@@ -113,7 +113,7 @@ def generate_trading_signals(df):
     
     return signals
 
-def predict_next_week_trend(df):
+def predict_next_week_ohlc(df):
     try:
         # Prepare data for prediction
         df = df.copy()
@@ -121,40 +121,74 @@ def predict_next_week_trend(df):
         df['Days'] = (df['Date'] - df['Date'].min()).dt.days
         df = df.dropna()
         
-        # Linear Regression Prediction
+        # Get ATR for volatility measure
+        atr = df['ATR'].iloc[-1]
+        
+        # Predict Close prices using multiple methods
+        # Method 1: Linear Regression
         X = df[['Days']].values[-30:]  # Use last 30 days
-        y = df['Close'].values[-30:]
+        y_close = df['Close'].values[-30:]
         
         lr_model = LinearRegression()
-        lr_model.fit(X, y)
-        
-        # Predict next 5 trading days (1 week)
-        next_days = np.array([X[-1] + i + 1 for i in range(5)]).reshape(-1, 1)
+        lr_model.fit(X, y_close)
+        next_days = np.array([X[-1] + i + 1 for i in range(7)]).reshape(-1, 1)
         lr_predictions = lr_model.predict(next_days)
         
-        # ARIMA Prediction
-        arima_model = ARIMA(y, order=(5,1,0))
+        # Method 2: ARIMA
+        arima_model = ARIMA(y_close, order=(5,1,0))
         arima_model_fit = arima_model.fit()
-        arima_predictions = arima_model_fit.forecast(steps=5)
+        arima_predictions = arima_model_fit.forecast(steps=7)
         
-        # Combine predictions (simple average)
-        combined_predictions = (lr_predictions + arima_predictions) / 2
+        # Combine predictions (weighted average)
+        combined_close = (lr_predictions * 0.6 + arima_predictions * 0.4)
+        
+        # Generate OHLC data based on predicted close and volatility
+        predicted_ohlc = []
+        prev_close = df['Close'].iloc[-1]
+        
+        for i in range(7):
+            # Base the prediction on the combined close
+            close = combined_close[i]
+            
+            # Calculate open (previous close with small random variation)
+            open_price = prev_close * (1 + np.random.uniform(-0.005, 0.005))
+            
+            # Calculate high and low based on ATR (volatility)
+            high = close * (1 + np.random.uniform(0, atr/close))
+            low = close * (1 - np.random.uniform(0, atr/close))
+            
+            # Ensure high > low and proper ordering
+            high = max(open_price, close, high)
+            low = min(open_price, close, low)
+            
+            predicted_ohlc.append({
+                'Date': datetime.today() + timedelta(days=i+1),
+                'Open': open_price,
+                'High': high,
+                'Low': low,
+                'Close': close
+            })
+            
+            prev_close = close
+        
+        predicted_df = pd.DataFrame(predicted_ohlc)
+        predicted_df.set_index('Date', inplace=True)
         
         # Calculate trend
         current_price = df['Close'].iloc[-1]
-        predicted_end_price = combined_predictions[-1]
+        predicted_end_price = predicted_df['Close'].iloc[-1]
         percent_change = ((predicted_end_price - current_price) / current_price) * 100
         
-        if percent_change > 2:
+        if percent_change > 3:
             trend = "Strong Bullish"
             confidence = "High"
-        elif percent_change > 0.5:
+        elif percent_change > 1:
             trend = "Bullish"
             confidence = "Medium"
-        elif percent_change < -2:
+        elif percent_change < -3:
             trend = "Strong Bearish"
             confidence = "High"
-        elif percent_change < -0.5:
+        elif percent_change < -1:
             trend = "Bearish"
             confidence = "Medium"
         else:
@@ -163,7 +197,7 @@ def predict_next_week_trend(df):
         
         return {
             "current_price": current_price,
-            "predicted_prices": combined_predictions,
+            "predicted_ohlc": predicted_df,
             "predicted_end_price": predicted_end_price,
             "percent_change": percent_change,
             "trend": trend,
@@ -292,35 +326,52 @@ def plot_rsi(df):
     
     st.plotly_chart(fig, use_container_width=True)
 
-def plot_prediction(current_price, predicted_prices):
-    dates = pd.date_range(start=datetime.today(), periods=6)
+def plot_ohlc_prediction(current_data, predicted_data, ticker):
+    # Combine last 5 days of actual data with predicted data
+    last_actual = current_data.iloc[-5:]
+    combined = pd.concat([last_actual, predicted_data])
     
     fig = go.Figure()
     
-    # Current price
-    fig.add_trace(go.Scatter(
-        x=[dates[0]],
-        y=[current_price],
-        mode='markers',
-        marker=dict(size=12, color='blue'),
-        name='Current Price'
+    # Actual OHLC (last 5 days)
+    fig.add_trace(go.Candlestick(
+        x=last_actual.index,
+        open=last_actual['Open'],
+        high=last_actual['High'],
+        low=last_actual['Low'],
+        close=last_actual['Close'],
+        name='Actual',
+        increasing_line_color='green',
+        decreasing_line_color='red'
     ))
     
-    # Predicted prices
-    fig.add_trace(go.Scatter(
-        x=dates[1:],
-        y=predicted_prices,
-        mode='lines+markers',
-        line=dict(color='green', width=2),
-        marker=dict(size=8),
-        name='Predicted Prices'
+    # Predicted OHLC (next 7 days)
+    fig.add_trace(go.Candlestick(
+        x=predicted_data.index,
+        open=predicted_data['Open'],
+        high=predicted_data['High'],
+        low=predicted_data['Low'],
+        close=predicted_data['Close'],
+        name='Predicted',
+        increasing_line_color='lightgreen',
+        decreasing_line_color='lightcoral',
+        opacity=0.7
     ))
+    
+    # Add divider line between actual and predicted
+    fig.add_vline(
+        x=last_actual.index[-1],
+        line_dash="dash",
+        line_color="gray"
+    )
     
     fig.update_layout(
-        title='Next Week Price Prediction',
+        title=f'{ticker} - Actual vs Predicted OHLC (Next 7 Days)',
         xaxis_title='Date',
         yaxis_title='Price',
-        height=400
+        xaxis_rangeslider_visible=False,
+        height=500,
+        showlegend=True
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -341,7 +392,7 @@ def analyze_all_stocks(stock_symbols, period="3mo"):
             score = sum([s[2] for s in signals])
             
             # Get prediction
-            prediction = predict_next_week_trend(df)
+            prediction = predict_next_week_ohlc(df)
             if prediction:
                 pred_score = 2 if "Bullish" in prediction['trend'] else (-2 if "Bearish" in prediction['trend'] else 0)
                 score += pred_score
@@ -360,10 +411,10 @@ def analyze_all_stocks(stock_symbols, period="3mo"):
     return sorted(analysis_results, key=lambda x: x['Score'], reverse=True)
 
 def main():
-    st.set_page_config(page_title="Advanced Stock Analysis", layout="wide")
+    st.set_page_config(page_title="Stock Analysis Pro", layout="wide")
     
-    st.title("📊 Advanced Stock Technical Analysis with Predictive Analytics")
-    st.write("Analyze stocks and predict upcoming trends using technical indicators")
+    st.title("📊 Advanced Stock Analysis with OHLC Prediction")
+    st.write("Technical analysis dashboard with 7-day OHLC price prediction")
     
     # Load stock symbols
     stock_symbols = load_stock_symbols()
@@ -463,18 +514,23 @@ def main():
                     else:
                         st.info(f"{signal[0]}: {signal[1]}")
             
-            # Predict next week trend
-            prediction = predict_next_week_trend(df)
+            # Predict next week trend with OHLC
+            prediction = predict_next_week_ohlc(df)
             if prediction:
-                with st.expander("Next Week Prediction", expanded=True):
+                with st.expander("Next Week OHLC Prediction", expanded=True):
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Predicted Trend", prediction['trend'])
                     col2.metric("Expected Change", f"{prediction['percent_change']:.2f}%")
                     col3.metric("Confidence", prediction['confidence'])
                     
-                    plot_prediction(prediction['current_price'], prediction['predicted_prices'])
+                    # Show predicted OHLC data
+                    st.write("Predicted OHLC Data for Next 7 Days:")
+                    st.dataframe(prediction['predicted_ohlc'].style.format("{:.2f}"))
+                    
+                    # Plot OHLC prediction chart
+                    plot_ohlc_prediction(df, prediction['predicted_ohlc'], ticker)
             
-            # Plot charts
+            # Plot technical charts
             plot_stock_data(df, ticker)
             
             col1, col2 = st.columns(2)
@@ -491,8 +547,8 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### About")
     st.sidebar.info(
-        "This dashboard provides advanced technical analysis of stocks with predictive capabilities. "
-        "It uses multiple indicators and machine learning models to predict the next week's trend. "
+        "This dashboard provides advanced technical analysis with OHLC price prediction. "
+        "Predictions are based on Linear Regression and ARIMA models combined with volatility measures. "
         "The 'Analyze All Stocks' button identifies the top performing stocks based on technical signals."
     )
 
